@@ -213,6 +213,7 @@ UI.InspectorView = class extends UI.VBox {
    * @param {boolean} focus
    */
   _showDrawer(focus) {
+    dirac.feedback("showDrawer");
     if (this._drawerTabbedPane.isShowing())
       return;
     this._drawerSplitWidget.showBoth();
@@ -312,6 +313,7 @@ UI.InspectorView = class extends UI.VBox {
    */
   _tabSelected(event) {
     const tabId = /** @type {string} */ (event.data['tabId']);
+    dirac.notifyPanelSwitch(tabId);
     Host.userMetrics.panelShown(tabId);
   }
 

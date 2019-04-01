@@ -37,6 +37,11 @@ Console.ConsoleView = class extends UI.VBox {
     this.setMinimumSize(0, 35);
     this.registerRequiredCSS('console/consoleView.css');
     this.registerRequiredCSS('object_ui/objectValue.css');
+    this.registerRequiredCSS("console/dirac-hacks.css");
+    this.registerRequiredCSS("console/dirac-codemirror.css");
+    this.registerRequiredCSS("console/dirac-theme.css");
+    this.registerRequiredCSS("console/dirac-prompt.css");
+    dirac.initConsole();
 
     this._searchableView = new UI.SearchableView(this);
     this._searchableView.element.classList.add('console-searchable-view');
@@ -185,6 +190,13 @@ Console.ConsoleView = class extends UI.VBox {
     this._promptElement.appendChild(promptIcon);
     this._promptElement.id = 'console-prompt';
 
+    var diracPromptElement = this._messagesElement.createChild("div", "source-code");
+    diracPromptElement.id = "console-prompt-dirac";
+    diracPromptElement.spellcheck = false;
+    var diracPromptCodeMirrorInstance = dirac.adoptPrompt(diracPromptElement, dirac.hasParinfer);
+
+    diracPromptElement.classList.add("inactive-prompt");
+
     // FIXME: This is a workaround for the selection machinery bug. See crbug.com/410899
     const selectAllFixer = this._messagesElement.createChild('div', 'console-view-fix-select-all');
     selectAllFixer.textContent = '.';
@@ -222,17 +234,75 @@ Console.ConsoleView = class extends UI.VBox {
     this._updateFilterStatus();
     this._timestampsSetting.addChangeListener(this._consoleTimestampsSettingChanged, this);
 
+    this._pendingDiracCommands = {};
+    this._lastDiracCommandId = 1;
+    this._prompts = [];
+    this._prompts.push({id: "js",
+      prompt: this._prompt,
+      element: this._promptElement,
+      proxy: this._prompt.element});
+    this._activePromptIndex = 0;
+
+    if (dirac.hasREPL) {
+      var diracPrompt = new Console.DiracPromptWithHistory(diracPromptCodeMirrorInstance);
+      diracPrompt.setAutocompletionTimeout(0);
+      diracPrompt.renderAsBlock();
+      var diracProxyElement = diracPrompt.attach(diracPromptElement);
+      diracProxyElement.classList.add("console-prompt-dirac-wrapper");
+      diracProxyElement.addEventListener("keydown", this._promptKeyDown.bind(this), true);
+
+      this._diracHistorySetting = Common.settings.createLocalSetting("diracHistory", []);
+      var diracHistoryData = this._diracHistorySetting.get();
+      diracPrompt.history().setHistoryData(diracHistoryData);
+
+      var statusElement = diracPromptElement.createChild("div");
+      statusElement.id = "console-status-dirac";
+
+      var statusBannerElement = statusElement.createChild("div", "status-banner");
+      statusBannerElement.addEventListener("click", this._diracStatusBannerClick.bind(this), true);
+      var statusContentElement = statusElement.createChild("div", "status-content");
+      statusContentElement.tabIndex = 0; // focusable for page-up/down
+
+      this._diracPromptDescriptor = {id: "dirac",
+        prompt: diracPrompt,
+        element: diracPromptElement,
+        proxy: diracProxyElement,
+        status: statusElement,
+        statusContent: statusContentElement,
+        statusBanner: statusBannerElement,
+        codeMirror: diracPromptCodeMirrorInstance};
+      this._prompts.push(this._diracPromptDescriptor);
+    }
+
     this._registerWithMessageSink();
 
     UI.context.addFlavorChangeListener(SDK.ExecutionContext, this._executionContextChanged, this);
 
+    this._consolePromptIndexSetting = Common.settings.createLocalSetting("consolePromptIndex", 0);
+
+    this._consoleFeedback = 0;
+
+    if (dirac.hasREPL) {
+      this.setDiracPromptMode("status");
+      setTimeout(() => this._switchToLastPrompt(), 200);
+    } else {
+      dirac.feedback("!dirac.hasREPL");
+    }
+    dirac.feedback("ConsoleView constructed");
+    if (dirac.hasWelcomeMessage) {
+      this.displayWelcomeMessage();
+    } else {
+      dirac.feedback("!dirac.hasWelcomeMessage");
+    }
+
     this._messagesElement.addEventListener(
-        'mousedown', event => this._updateStickToBottomOnMouseDown(event.button === 2), false);
+      'mousedown', event => this._updateStickToBottomOnMouseDown(event.button === 2), false);
     this._messagesElement.addEventListener('mouseup', this._updateStickToBottomOnMouseUp.bind(this), false);
     this._messagesElement.addEventListener('mouseleave', this._updateStickToBottomOnMouseUp.bind(this), false);
     this._messagesElement.addEventListener('wheel', this._updateStickToBottomOnWheel.bind(this), false);
 
     SDK.consoleModel.addEventListener(SDK.ConsoleModel.Events.ConsoleCleared, this._consoleCleared, this);
+    SDK.consoleModel.addEventListener(SDK.ConsoleModel.Events.DiracMessage, this._onConsoleDiracMessage, this);
     SDK.consoleModel.addEventListener(SDK.ConsoleModel.Events.MessageAdded, this._onConsoleMessageAdded, this);
     SDK.consoleModel.addEventListener(SDK.ConsoleModel.Events.MessageUpdated, this._onConsoleMessageUpdated, this);
     SDK.consoleModel.addEventListener(SDK.ConsoleModel.Events.CommandEvaluated, this._commandEvaluated, this);
@@ -362,6 +432,7 @@ Console.ConsoleView = class extends UI.VBox {
   }
 
   _executionContextChanged() {
+    this._switchToLastPrompt();
     this._prompt.clearAutocomplete();
   }
 
@@ -474,12 +545,462 @@ Console.ConsoleView = class extends UI.VBox {
     this._lastShownHiddenByFilterCount = this._hiddenByFilterCount;
   }
 
+  _switchToLastPrompt() {
+    this._switchPromptIfAvail(this._activePromptIndex, this._consolePromptIndexSetting.get());
+  }
+
+  _diracStatusBannerClick(event) {
+    if (!event.target || event.target.tagName != "A") {
+      return false;
+    }
+    if (this._diracPromptDescriptor.statusBannerCallback) {
+      this._diracPromptDescriptor.statusBannerCallback("click", event);
+    }
+    return false;
+  }
+
+  setDiracPromptStatusContent(s) {
+    dirac.feedback("setDiracPromptStatusContent('"+s+"')");
+    this._diracPromptDescriptor.statusContent.innerHTML = s;
+  }
+
+  setDiracPromptStatusBanner(s) {
+    dirac.feedback("setDiracPromptStatusBanner('"+s+"')");
+    this._diracPromptDescriptor.statusBanner.innerHTML = s;
+  }
+
+  setDiracPromptStatusBannerCallback(callback) {
+    this._diracPromptDescriptor.statusBannerCallback = callback;
+  }
+
+  setDiracPromptStatusStyle(style) {
+    dirac.feedback("setDiracPromptStatusStyle('"+style+"')");
+    var knownStyles = ["error", "info"];
+    if (knownStyles.indexOf(style)==-1) {
+      console.warn("unknown style passed to setDiracPromptStatusStyle:", style);
+    }
+    for (var i = 0; i < knownStyles.length; i++) {
+      var s = knownStyles[i];
+      this._diracPromptDescriptor.status.classList.toggle("dirac-prompt-status-"+s, style==s);
+    }
+  }
+
+  setDiracPromptMode(mode) {
+    dirac.feedback("setDiracPromptMode('"+mode+"')");
+    var knownModes = ["edit", "status"];
+    if (knownModes.indexOf(mode)==-1) {
+      console.warn("unknown mode passed to setDiracPromptMode:", mode);
+    }
+    for (var i = 0; i < knownModes.length; i++) {
+      var m = knownModes[i];
+      this._diracPromptDescriptor.element.classList.toggle("dirac-prompt-mode-"+m, mode==m);
+    }
+    if (mode=="edit") {
+      this.focus();
+    }
+  }
+
+  _buildPromptPlaceholder(namespace, compiler) {
+    const placeholderEl = createElementWithClass("div", "dirac-prompt-placeholder");
+    const namespaceEl = createElementWithClass("span", "dirac-prompt-namespace");
+    namespaceEl.textContent = namespace || "";
+    if (compiler) {
+      const compilerEl = createElementWithClass("span", "dirac-prompt-compiler");
+      compilerEl.textContent = compiler;
+      placeholderEl.appendChildren(namespaceEl, compilerEl);
+    } else {
+      placeholderEl.appendChildren(namespaceEl);
+    }
+    return placeholderEl;
+  }
+
+  _refreshPromptInfo() {
+    var promptDescriptor = this._prompts[this._activePromptIndex];
+    if (promptDescriptor.id != "dirac") {
+      return;
+    }
+
+    var namespace = this._currentNamespace || "";
+    var compiler = this._currentCompiler;
+    const placeholderEl = this._buildPromptPlaceholder(namespace, compiler);
+    promptDescriptor.codeMirror.setOption("placeholder", placeholderEl);
+  }
+
+  setDiracPromptNS(name) {
+    dirac.feedback("setDiracPromptNS('"+name+"')");
+    this._currentNamespace = name;
+    if (this._diracPromptDescriptor) {
+      this._diracPromptDescriptor.prompt.setCurrentClojureScriptNamespace(name);
+    }
+    this._refreshPromptInfo();
+  }
+
+  setDiracPromptCompiler(name) {
+    //dirac.feedback("setDiracPromptCompiler('"+name+"')");
+    this._currentCompiler = name;
+    this._refreshPromptInfo();
+  }
+
+  onJobStarted(requestId) {
+    dirac.feedback("repl eval job started");
+  }
+
+  onJobEnded(requestId) {
+    delete this._pendingDiracCommands[requestId];
+    dirac.feedback("repl eval job ended");
+  }
+
+  /**
+   * @return {string}
+   */
+  getSuggestBoxRepresentation() {
+    var promptDescriptor = this.getCurrentPromptDescriptor();
+    return promptDescriptor.id + " prompt: " + promptDescriptor.prompt.getSuggestBoxRepresentation();
+  }
+
+  /**
+   * @return {string}
+   */
+  getPromptRepresentation() {
+    return this._prompt.text();
+  }
+
+  handleEvalCLJSConsoleDiracMessage(message) {
+    const code = message.parameters[2];
+    if (code && typeof code.value == 'string') {
+      this.appendDiracCommand(code.value, null);
+    }
+  }
+
+  handleEvalJSConsoleDiracMessage(message) {
+    const code = message.parameters[2];
+    if (code && typeof code.value == 'string') {
+      const jsPromptDescriptor = this._getPromptDescriptor("js");
+      if (jsPromptDescriptor) {
+        jsPromptDescriptor.prompt._appendCommand(code.value, true);
+      }
+    }
+  }
+
+  _onConsoleDiracMessage(event) {
+    var message = (event.data);
+    var command = message.parameters[1];
+    if (command)
+      command = command.value;
+
+    switch (command) {
+      case "eval-cljs":
+        this.handleEvalCLJSConsoleDiracMessage(message);
+        break;
+      case "eval-js":
+        this.handleEvalJSConsoleDiracMessage(message);
+        break;
+      default:
+        throw ("unrecognized Dirac message: " + command);
+    }
+  }
+
+
+  _alterDiracViewMessage(message) {
+    var nestingLevel = this._currentGroup.nestingLevel();
+
+    message.messageText = "";
+    message.parameters.shift(); // "~~$DIRAC-LOG$~~"
+
+    // do not display location link
+    message.url = undefined;
+    message.stackTrace = undefined;
+
+    var requestId = null;
+    var kind = null;
+    try {
+      requestId = message.parameters.shift().value; // request-id
+      kind = message.parameters.shift().value;
+    } catch (e) {
+    }
+
+    if (kind === "result") {
+      message.type = SDK.ConsoleMessage.MessageType.Result;
+    }
+
+    var originatingMessage = this._pendingDiracCommands[requestId];
+    if (originatingMessage) {
+      message.setOriginatingMessage(originatingMessage);
+      this._pendingDiracCommands[requestId] = message;
+    }
+
+    return kind ? ("dirac-" + kind) : null;
+  }
+
+  _levelForFeedback(level) {
+    return level || "???";
+  }
+
+  _typeForFeedback(messageType, isDiracFlavored) {
+    if (isDiracFlavored) {
+      return "DF";
+    }
+    if (messageType === SDK.ConsoleMessage.MessageType.DiracCommand) {
+      return "DC";
+    }
+    return "JS";
+  }
+
+  _createViewMessage(message) {
+    // this is a HACK to treat REPL messages as Dirac results
+    var isDiracFlavoredMessage = message.messageText == "~~$DIRAC-LOG$~~";
+    var extraClass = null;
+
+    if (isDiracFlavoredMessage) {
+      extraClass = this._alterDiracViewMessage(message);
+    }
+
+    var result = this._createViewMessage2(message);
+
+    if (isDiracFlavoredMessage) {
+      var wrapperElement = result.element();
+      wrapperElement.classList.add("dirac-flavor");
+      if (extraClass) {
+        wrapperElement.classList.add(extraClass);
+      }
+    }
+
+    if (this._consoleFeedback) {
+      try {
+        var levelText = this._levelForFeedback(message.level);
+        var typeText = this._typeForFeedback(message.type, isDiracFlavoredMessage);
+        var messageText = result.contentElement().querySelector(".console-message-text").deepTextContent();
+        var glue = (messageText.indexOf("\n") === -1) ? "> " : ">\n"; // log multi-line log messages on a new line
+        dirac.feedback(typeText + "." + levelText + glue + messageText);
+      } catch (e) {
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * @param {string} markup
+   * @return {boolean}
+   */
+  appendDiracMarkup(markup) {
+    const target = SDK.targetManager.mainTarget();
+    if (!target) {
+      return false;
+    }
+    const runtimeModel = target.model(SDK.RuntimeModel);
+    if (!runtimeModel) {
+      return false;
+    }
+    const source = SDK.ConsoleMessage.MessageSource.Other;
+    const level = SDK.ConsoleMessage.MessageLevel.Info;
+    const type = SDK.ConsoleMessage.MessageType.DiracMarkup;
+    const message = new SDK.ConsoleMessage(runtimeModel, source, level, markup, type);
+    SDK.consoleModel.addMessage(message);
+    return true;
+  }
+
+  displayWelcomeMessage() {
+    dirac.feedback('displayWelcomeMessage');
+    const wrapCode = (text) => {
+      return "<code style='background-color:rgba(0, 0, 0, 0.08);padding:0 2px;border-radius:1px'>" + text + "</code>";
+    };
+    const wrapBold = (text) => {
+      return "<b>" + text + "</b>";
+    };
+
+    var markup = [
+      "Welcome to " + wrapBold("Dirac DevTools") + " hosted in " + wrapBold("Dirac Chrome Extension v" + dirac.getVersion()) + ".",
+      "Use " + wrapCode("CTRL+.") + " and " + wrapCode("CTRL+,") + " to cycle between Javascript and ClojureScript prompts.",
+      "In connected ClojureScript prompt, you can enter " + wrapCode("(dirac!)") + " for more info."];
+    if (!this.appendDiracMarkup(markup.join("\n"))) {
+      console.warn("displayWelcomeMessage: unable to add console message");
+    }
+  }
+
+  _normalizePromptIndex(index) {
+    var count = this._prompts.length;
+    while (index<0) {
+      index += count;
+    }
+    return index % count;
+  }
+
+  _switchPromptIfAvail(oldPromptIndex, newPromptIndex) {
+    var oldIndex = this._normalizePromptIndex(oldPromptIndex);
+    var newIndex = this._normalizePromptIndex(newPromptIndex);
+    if (oldIndex == newIndex) {
+      return; // nothing to do
+    }
+
+    this._switchPrompt(oldIndex, newIndex);
+  }
+
+  _switchPrompt(oldPromptIndex, newPromptIndex) {
+    var oldPromptDescriptor = this._prompts[this._normalizePromptIndex(oldPromptIndex)];
+    var newPromptDescriptor = this._prompts[this._normalizePromptIndex(newPromptIndex)];
+
+    newPromptDescriptor.element.classList.remove("inactive-prompt");
+
+    this._prompt = newPromptDescriptor.prompt;
+    this._promptElement = newPromptDescriptor.element;
+    this._activePromptIndex = this._normalizePromptIndex(newPromptIndex);
+    this._consolePromptIndexSetting.set(this._activePromptIndex);
+    this._searchableView.setDefaultFocusedElement(this._promptElement);
+
+    oldPromptDescriptor.element.classList.add("inactive-prompt");
+
+    dirac.feedback("switched console prompt to '" + newPromptDescriptor.id + "'");
+    this._prompt.setText(""); // clear prompt when switching
+    this.focus();
+
+    if (newPromptDescriptor.id == "dirac") {
+      dirac.initRepl();
+    }
+  }
+
+  _selectNextPrompt() {
+    this._switchPromptIfAvail(this._activePromptIndex, this._activePromptIndex+1);
+  }
+
+  _selectPrevPrompt() {
+    this._switchPromptIfAvail(this._activePromptIndex, this._activePromptIndex-1);
+  }
+
+  _findPromptIndexById(id) {
+    for (var i=0; i<this._prompts.length; i++) {
+      var promptDescriptor = this._prompts[i];
+      if (promptDescriptor.id === id) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  _getPromptDescriptor(promptId) {
+    var promptIndex = this._findPromptIndexById(promptId);
+    if (promptIndex === null) {
+      return null;
+    }
+    return this._prompts[promptIndex];
+  }
+
+  switchPrompt(promptId) {
+    var selectedPromptIndex = this._findPromptIndexById(promptId);
+    if (selectedPromptIndex === null) {
+      console.warn("switchPrompt: unknown prompt id ", promptId);
+      return;
+    }
+    this._switchPromptIfAvail(this._activePromptIndex, selectedPromptIndex);
+  }
+
+  /**
+   * @return {!Object}
+   */
+  getCurrentPromptDescriptor() {
+    return this._prompts[this._activePromptIndex];
+  }
+
+  /**
+   * @return {!Element}
+   */
+  getTargetForPromptEvents() {
+    var promptDescriptor = this.getCurrentPromptDescriptor();
+    var inputEl = promptDescriptor.proxy;
+    if (promptDescriptor.codeMirror) {
+      inputEl = promptDescriptor.codeMirror.getInputField();
+    }
+    return inputEl;
+  }
+
+  /**
+   * @return {!Promise}
+   */
+  dispatchEventsForPromptInput(input) {
+    return new Promise((resolve) => {
+      const continuation = () => resolve("entered input: '" + input + "'");
+      const keyboard = Keysim.Keyboard.US_ENGLISH;
+      keyboard.dispatchEventsForInput(input, this.getTargetForPromptEvents(), continuation);
+    });
+  }
+
+  /**
+   * @return {!Promise}
+   */
+  dispatchEventsForPromptAction(action) {
+    return new Promise((resolve) => {
+      const continuation = () => resolve("performed action: '" + action + "'");
+      const keyboard = Keysim.Keyboard.US_ENGLISH;
+      keyboard.dispatchEventsForAction(action, this.getTargetForPromptEvents(), continuation);
+    });
+  }
+
+  /**
+   * @return {number}
+   */
+  enableConsoleFeedback() {
+    this._consoleFeedback++;
+    return this._consoleFeedback;
+  }
+
+  /**
+   * @return {number}
+   */
+  disableConsoleFeedback() {
+    this._consoleFeedback--;
+    return this._consoleFeedback;
+  }
+
+  appendDiracCommand(text, id) {
+    if (!text)
+      return;
+
+    if (!id) {
+      id = this._lastDiracCommandId++;
+    }
+
+    const command = text;
+    const commandId = id;
+
+    const executionContext = UI.context.flavor(SDK.ExecutionContext);
+    if (!executionContext) {
+      return;
+    }
+
+    this._prompt.setText("");
+    const runtimeModel = executionContext.runtimeModel;
+    const type = SDK.ConsoleMessage.MessageType.DiracCommand;
+    const source = SDK.ConsoleMessage.MessageSource.JS;
+    const level = SDK.ConsoleMessage.MessageLevel.Info;
+    const commandMessage = new SDK.ConsoleMessage(runtimeModel, source, level, text, type);
+    commandMessage.setExecutionContextId(executionContext.id);
+    SDK.consoleModel.addMessage(commandMessage);
+
+    this._prompt.history().pushHistoryItem(text);
+    this._diracHistorySetting.set(this._prompt.history().historyData().slice(-Console.ConsoleView.persistedHistorySize));
+
+    const debuggerModel = executionContext.debuggerModel;
+    let scopeInfoPromise = Promise.resolve(null);
+    if (debuggerModel) {
+      scopeInfoPromise = dirac.extractScopeInfoFromScopeChainAsync(debuggerModel.selectedCallFrame());
+    }
+
+    this._pendingDiracCommands[commandId] = commandMessage;
+    scopeInfoPromise.then(function (scopeInfo) {
+      dirac.sendEvalRequest(commandId, command, scopeInfo);
+    });
+  }
+
   /**
    * @param {!Common.Event} event
    */
   _onConsoleMessageAdded(event) {
     const message = /** @type {!SDK.ConsoleMessage} */ (event.data);
     this._addConsoleMessage(message);
+  }
+
+  _normalizeMessageTimestamp(message) {
+    message.timestamp = this._consoleMessages.length ? this._consoleMessages.peekLast().consoleMessage().timestamp : 0;
   }
 
   /**
@@ -625,12 +1146,16 @@ Console.ConsoleView = class extends UI.VBox {
    * @param {!SDK.ConsoleMessage} message
    * @return {!Console.ConsoleViewMessage}
    */
-  _createViewMessage(message) {
+  _createViewMessage2(message) {
     const nestingLevel = this._currentGroup.nestingLevel();
     switch (message.type) {
       case SDK.ConsoleMessage.MessageType.Command:
         return new Console.ConsoleCommand(
             message, this._linkifier, this._badgePool, nestingLevel, this._onMessageResizedBound);
+      case SDK.ConsoleMessage.MessageType.DiracCommand:
+        return new Console.ConsoleDiracCommand(message, this._linkifier, this._badgePool, nestingLevel);
+      case SDK.ConsoleMessage.MessageType.DiracMarkup:
+        return new Console.ConsoleDiracMarkup(message, this._linkifier, this._badgePool, nestingLevel);
       case SDK.ConsoleMessage.MessageType.Result:
         return new Console.ConsoleCommandResult(
             message, this._linkifier, this._badgePool, nestingLevel, this._onMessageResizedBound);
@@ -948,6 +1473,16 @@ Console.ConsoleView = class extends UI.VBox {
     }
 
     section.addKey(shortcut.makeDescriptor(shortcut.Keys.Enter), Common.UIString('Execute command'));
+
+    if (dirac.hasREPL) {
+      keys = [
+        shortcut.makeDescriptor(shortcut.Keys.Comma, UI.KeyboardShortcut.Modifiers.Ctrl),
+        shortcut.makeDescriptor(shortcut.Keys.Period, UI.KeyboardShortcut.Modifiers.Ctrl)
+      ];
+      this._shortcuts[keys[0].key] = this._selectNextPrompt.bind(this);
+      this._shortcuts[keys[1].key] = this._selectPrevPrompt.bind(this);
+      section.addRelatedKeys(keys, Common.UIString("Next/previous prompt"));
+    }
   }
 
   _clearPromptBackwards() {
@@ -962,6 +1497,26 @@ Console.ConsoleView = class extends UI.VBox {
     if (keyboardEvent.key === 'PageUp') {
       this._updateStickToBottomOnWheel();
       return;
+    } else if (isEnterKey(keyboardEvent)) {
+      // TODO: this should be eventually moved to DiracPrompt.js
+      // let's wait for upstream to finish transition to ConsolePrompt.js
+      var promptDescriptor = this._prompts[this._activePromptIndex];
+      if (promptDescriptor.id == "dirac") {
+        if (event.altKey || event.ctrlKey || event.shiftKey)
+          return;
+
+        event.consume(true);
+
+        this._prompt.clearAutocomplete();
+
+        var str = this._prompt.text();
+        if (!str.length) {
+          return;
+        }
+
+        this.appendDiracCommand(str, null);
+        return;
+      }
     }
 
     const shortcut = UI.KeyboardShortcut.makeKeyFromEvent(keyboardEvent);
@@ -1417,6 +1972,20 @@ Console.ConsoleViewFilter = class {
  * @unrestricted
  */
 Console.ConsoleCommand = class extends Console.ConsoleViewMessage {
+
+  /**
+   * @param {!SDK.ConsoleMessage} consoleMessage
+   * @param {!Components.Linkifier} linkifier
+   * @param {!ProductRegistry.BadgePool} badgePool
+   * @param {number} nestingLevel
+   * @param {function(!Common.Event)} onResize
+   */
+  constructor(consoleMessage, linkifier, badgePool, nestingLevel, onResize) {
+    super(consoleMessage, linkifier, badgePool, nestingLevel, onResize);
+    this._contentElement = null;
+    this._formattedCommand = null;
+  }
+
   /**
    * @override
    * @return {!Element}
@@ -1456,6 +2025,50 @@ Console.ConsoleCommand = class extends Console.ConsoleViewMessage {
  * @type {number}
  */
 Console.ConsoleCommand.MaxLengthToIgnoreHighlighter = 10000;
+
+Console.ConsoleDiracCommand = class extends Console.ConsoleCommand {
+  /**
+   * @override
+   * @return {!Element}
+   */
+  contentElement() {
+    if (!this._contentElement) {
+      this._contentElement = createElementWithClass("div", "console-user-command");
+      var icon = UI.Icon.create('smallicon-user-command', 'command-result-icon');
+      this._contentElement.appendChild(icon);
+
+      this._contentElement.message = this;
+
+      this._formattedCommand = createElementWithClass("span", "console-message-text source-code cm-s-dirac");
+      this._contentElement.appendChild(this._formattedCommand);
+
+      CodeMirror.runMode(this.text, "clojure-parinfer", this._formattedCommand, undefined);
+
+      this.element().classList.add("dirac-flavor"); // applied to wrapper element
+    }
+    return this._contentElement;
+  }
+};
+
+Console.ConsoleDiracMarkup = class extends Console.ConsoleCommand {
+  /**
+   * @override
+   * @return {!Element}
+   */
+  contentElement() {
+    if (!this._contentElement) {
+      this._contentElement = createElementWithClass("div", "console-message console-dirac-markup");
+      this._contentElement.message = this;
+
+      this._formattedCommand = createElementWithClass("span", "console-message-text source-code");
+      this._formattedCommand.innerHTML = this.consoleMessage().messageText;
+      this._contentElement.appendChild(this._formattedCommand);
+
+      this.element().classList.add("dirac-flavor"); // applied to wrapper element
+    }
+    return this._contentElement;
+  }
+};
 
 Console.ConsoleCommandResult = class extends Console.ConsoleViewMessage {
   /**

@@ -1,12 +1,14 @@
 {
   "dependencies": [
     "common",
+    "dirac",
     "host"
   ],
   "scripts": [
     "NodeURL.js",
     "InspectorBackend.js",
-    "../InspectorBackendCommands.js"
+    "../InspectorBackendCommands.js",
+    "InspectorBackendExtensionMode.js"
   ],
   "skip_compilation": [
     "../InspectorBackendCommands.js"

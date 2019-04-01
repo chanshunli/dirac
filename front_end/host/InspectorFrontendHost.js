@@ -123,7 +123,24 @@ Host.InspectorFrontendHostStub = class {
    * @suppressGlobalPropertiesCheck
    */
   inspectedURLChanged(url) {
-    document.title = Common.UIString('DevTools - %s', url.replace(/^https?:\/\//, ''));
+    if (!dirac.isIntercomReady()) {
+      // postpone this code, we use document.title for signalling of frontend loading completion, see inspector.js
+      const that = this;
+      setTimeout(function() { that.inspectedURLChanged(url); }, 500);
+      return;
+    }
+
+    var version = dirac.getVersion();
+    dirac.getRuntimeTag(
+      /** @suppressGlobalPropertiesCheck */
+      function(tag) {
+        if (!tag) {
+          tag = "[no runtime] " + url;
+        }
+        document.title = Common.UIString("Dirac v%s <-> %s", version, tag);
+      });
+    // this is just for a temporary display, we will update it when get_runtime_tag calls us back with full runtime info
+    document.title = Common.UIString("Dirac v%s <-> %s", version, url);
   }
 
   /**

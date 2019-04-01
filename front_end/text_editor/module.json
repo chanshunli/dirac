@@ -21,6 +21,8 @@
         "../cm_web_modes/xml.js",
         "../cm_web_modes/htmlmixed.js",
         "../cm_web_modes/htmlembedded.js",
+        "../cm_web_modes/runmode.js",
+        "../cm_web_modes/placeholder.js",
         "CodeMirrorUtils.js",
         "TextEditorAutocompleteController.js",
         "CodeMirrorTextEditor.js"
@@ -35,6 +37,8 @@
         "../cm_web_modes/javascript.js",
         "../cm_web_modes/xml.js",
         "../cm_web_modes/htmlmixed.js",
-        "../cm_web_modes/htmlembedded.js"
+        "../cm_web_modes/htmlembedded.js",
+        "../cm_web_modes/runmode.js",
+        "../cm_web_modes/placeholder.js"
     ]
 }

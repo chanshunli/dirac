@@ -28,16 +28,61 @@ var MAX_CONTENT_SHELLS = 10;
 var PLATFORM = getPlatform();
 var PYTHON = process.platform === 'win32' ? 'python.bat' : 'python';
 
-var CHROMIUM_SRC_PATH = CUSTOM_CHROMIUM_PATH || path.resolve(__dirname, '..', '..', '..', '..', '..');
+// Dirac-specific overrides
+const DIRAC_PATH = path.resolve(__dirname, "..", "..", "..", "..");
+const SCRIPTS_PATH = DIRAC_PATH+"/scripts";
+const POSITION_FOR_VERSION_SCRIPT = SCRIPTS_PATH+"/position-for-version.sh";
+const EXTRACT_CHROME_VERSION_SCRIPT = SCRIPTS_PATH+"/extract-backend-protocol-chrome-version.sh";
+const PRINT_CHROME_SRC_DIR_SCRIPT = SCRIPTS_PATH+"/print-chrome-src-dir.sh";
+
+function firstLine(s) {
+  return s.split('\n')[0];
+}
+
+function fetchDiracChromiumSrcPath() {
+  return firstLine(shell(`${PRINT_CHROME_SRC_DIR_SCRIPT}`).toString());
+}
+
+function findDiracChromiumCommit() {
+  const chromeVersion = firstLine(shell(`${EXTRACT_CHROME_VERSION_SCRIPT}`).toString());
+  return firstLine(shell(`${POSITION_FOR_VERSION_SCRIPT} ${chromeVersion}`).toString());
+}
+
+// https://gist.github.com/bpedro/742162#gistcomment-1786537
+function mkdir(dir) {
+  // we explicitly don't use `path.sep` to have it platform independent;
+  var sep = '/';
+
+  var segments = dir.split(sep);
+  var current = '';
+  var i = 0;
+
+  while (i < segments.length) {
+    current = current + sep + segments[i];
+    try {
+      fs.statSync(current);
+    } catch (e) {
+      fs.mkdirSync(current);
+    }
+
+    i++;
+  }
+}
+
+var CHROMIUM_SRC_PATH = fetchDiracChromiumSrcPath();
+// end of dirac-specific stuff
+
 var RELEASE_PATH = path.resolve(CHROMIUM_SRC_PATH, 'out', TARGET);
 var BLINK_TEST_PATH = path.resolve(CHROMIUM_SRC_PATH, 'third_party', 'blink', 'tools', 'run_web_tests.py');
 var DEVTOOLS_PATH = path.resolve(CHROMIUM_SRC_PATH, 'third_party', 'blink', 'renderer', 'devtools');
 var CACHE_PATH = path.resolve(DEVTOOLS_PATH, '.test_cache');
 var SOURCE_PATH = path.resolve(DEVTOOLS_PATH, 'front_end');
 
+CACHE_PATH = path.resolve(DEVTOOLS_PATH, '..', 'caches', '.test_cache');
+
 function main() {
   if (!utils.isDir(CACHE_PATH))
-    fs.mkdirSync(CACHE_PATH);
+    mkdir(CACHE_PATH);
   deleteOldContentShells();
 
   var hasUserCompiledContentShell = utils.isFile(getContentShellBinaryPath(RELEASE_PATH));
@@ -118,9 +163,7 @@ function getPlatform() {
 }
 
 function findMostRecentChromiumCommit() {
-  var commitMessage = shell(`git log --max-count=1 --grep="Cr-Commit-Position"`).toString().trim();
-  var commitPosition = commitMessage.match(/Cr-Commit-Position: refs\/heads\/master@\{#([0-9]+)\}/)[1];
-  return commitPosition;
+    return findDiracChromiumCommit();
 }
 
 function deleteOldContentShells() {

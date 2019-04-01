@@ -90,11 +90,51 @@ ObjectUI.ObjectPropertiesSection = class extends UI.TreeOutlineInShadow {
   }
 
   /**
+   * @return {number}
+   */
+  static PropertyCluster(property) {
+    // we want normal nice names to go first
+    // then all generated variable names with double underscores
+    // then all null values
+    // then all undefined values
+    try {
+      var value = property.value
+      if (!value) {
+        return 3;
+      }
+      if (value.type === "undefined") {
+        return 3;
+      }
+      if (value.subtype === "null") {
+        return 2;
+      }
+      var name = property.name;
+      if (name.indexOf("__")!=-1) {
+        return 1;
+      }
+      return 0;
+    } catch (e) {
+      return 4;
+    }
+  }
+
+  /**
    * @param {!SDK.RemoteObjectProperty} propertyA
    * @param {!SDK.RemoteObjectProperty} propertyB
    * @return {number}
    */
   static CompareProperties(propertyA, propertyB) {
+    if (dirac.hasClusteredLocals) {
+      var clusterA = ObjectUI.ObjectPropertiesSection.PropertyCluster(propertyA);
+      var clusterB = ObjectUI.ObjectPropertiesSection.PropertyCluster(propertyB);
+
+      if (clusterA > clusterB) {
+        return 1;
+      }
+      if (clusterA < clusterB) {
+        return -1;
+      }
+    }
     const a = propertyA.name;
     const b = propertyB.name;
     if (a === '__proto__')
@@ -118,14 +158,30 @@ ObjectUI.ObjectPropertiesSection = class extends UI.TreeOutlineInShadow {
 
   /**
    * @param {?string} name
+   * @param {?string=} friendlyName
+   * @param {?string=} friendlyNameNum
    * @return {!Element}
    */
-  static createNameElement(name) {
-    const nameElement = createElementWithClass('span', 'name');
-    if (/^\s|\s$|^$|\n/.test(name))
-      nameElement.createTextChildren('"', name.replace(/\n/g, '\u21B5'), '"');
+  static createNameElement(name, friendlyName, friendlyNameNum) {
+    const nameElement = createElementWithClass("span", "name");
+    const effectiveName = friendlyName || name;
+    if (/^\s|\s$|^$|\n/.test(effectiveName))
+      nameElement.createTextChildren("\"", effectiveName.replace(/\n/g, "\u21B5"), "\"");
     else
-      nameElement.textContent = name;
+      nameElement.textContent = effectiveName;
+
+    if (friendlyName) {
+      nameElement.classList.add("friendly-name");
+      if (friendlyNameNum) {
+        var sub = createElementWithClass("sub", "friendly-num");
+        sub.textContent = friendlyNameNum;
+        nameElement.appendChild(sub);
+      }
+      if (name) {
+        nameElement.title = name;
+      }
+    }
+
     return nameElement;
   }
 
@@ -562,15 +618,55 @@ ObjectUI.ObjectPropertyTreeElement = class extends UI.TreeElement {
       emptyPlaceholder) {
     properties.sort(ObjectUI.ObjectPropertiesSection.CompareProperties);
 
-    const tailProperties = [];
-    let protoProperty = null;
-    for (let i = 0; i < properties.length; ++i) {
-      const property = properties[i];
+    /**
+     * @param {string} name
+     * @return {?string}
+     */
+    function getFriendlyName(name) {
+      var duIndex = name.indexOf("__");
+      if (duIndex != -1) {
+        return name.substring(0, duIndex);
+      }
+      var suMatch = name.match(/(.*?)_\d+$/);
+      if (suMatch) {
+        return suMatch[1];
+      }
+      return null;
+    }
+
+    var friendlyNamesTable = {};
+    var previousProperty = null;
+    var tailProperties = [];
+    var protoProperty = null;
+    for (var i = 0; i < properties.length; ++i) {
+      var property = properties[i];
       property.parentObject = value;
+
+      if (dirac.hasClusteredLocals) {
+        property._cluster = ObjectUI.ObjectPropertiesSection.PropertyCluster(property);
+        if (previousProperty && property._cluster != previousProperty._cluster) {
+          property._afterClusterBoundary = true;
+          previousProperty._beforeClusterBoundary = true;
+        }
+      }
+
+      if (dirac.hasFriendlyLocals) {
+        var friendlyName = getFriendlyName(property.name);
+        if (friendlyName) {
+          property._friendlyName = friendlyName;
+          var num = friendlyNamesTable[friendlyName];
+          if (!num) num = 0;
+          num += 1;
+          property._friendlyNameNum = num;
+          friendlyNamesTable[friendlyName] = num;
+        }
+      }
+
       if (property.name === '__proto__' && !property.isAccessorProperty()) {
         protoProperty = property;
         continue;
       }
+      previousProperty = property;
 
       if (property.isOwn && property.getter) {
         const getterProperty = new SDK.RemoteObjectProperty('get ' + property.name, property.getter, false);
@@ -777,7 +873,7 @@ ObjectUI.ObjectPropertyTreeElement = class extends UI.TreeElement {
   }
 
   update() {
-    this.nameElement = ObjectUI.ObjectPropertiesSection.createNameElement(this.property.name);
+    this.nameElement = ObjectUI.ObjectPropertiesSection.createNameElement(this.property.name, this.property._friendlyName, this.property._friendlyNameNum);
     if (!this.property.enumerable)
       this.nameElement.classList.add('object-properties-section-dimmed');
     if (this.property.synthetic)
@@ -798,6 +894,16 @@ ObjectUI.ObjectPropertyTreeElement = class extends UI.TreeElement {
       this.valueElement.title = Common.UIString('No property getter');
     }
 
+    if (this.property._cluster !== undefined) {
+      var clusterClass = "cluster-"+this.property._cluster;
+      this.listItemElement.classList.add(clusterClass);
+    }
+    if (this.property._beforeClusterBoundary) {
+      this.listItemElement.classList.add("before-cluster-boundary");
+    }
+    if (this.property._afterClusterBoundary) {
+      this.listItemElement.classList.add("after-cluster-boundary");
+    }
     const valueText = this.valueElement.textContent;
     if (this.property.value && valueText && !this.property.wasThrown)
       this.expandedValueElement = this._createExpandedValueElement(this.property.value);
@@ -995,7 +1101,6 @@ ObjectUI.ObjectPropertyTreeElement = class extends UI.TreeElement {
     return this.nameElement.title;
   }
 };
-
 
 /**
  * @unrestricted

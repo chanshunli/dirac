@@ -30,6 +30,18 @@
 
 /** @typedef {string} */
 Protocol.Error = Symbol('Protocol.Error');
+/** @type {string} */
+Protocol.BakedInspectorBackendAPIChromeTag;
+/** @type {string} */
+Protocol.BakedInspectorBackendAPIChromeRev;
+/** @type {string} */
+Protocol.BakedInspectorBackendAPI;
+/** @type {string} */
+Protocol.BakedSupportedCSSPropertiesChromeTag;
+/** @type {string} */
+Protocol.BakedSupportedCSSPropertiesChromeRev;
+/** @type {string} */
+Protocol.BakedSupportedCSSProperties;
 
 /**
  * @unrestricted

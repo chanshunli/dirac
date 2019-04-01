@@ -887,14 +887,31 @@ Sources.DebuggerPlugin = class extends Sources.UISourceCodeFrame.Plugin {
     if (fromLine >= toLine || toLine - fromLine > 500 || fromLine < 0 || toLine >= this._textEditor.linesCount)
       return;
 
-    const valuesMap = new Map();
-    for (const property of properties)
-      valuesMap.set(property.name, property.value);
+    /**
+     * @param {string} name
+     * @param {number|string=} line
+     * @param {number|string=} column
+     * @return {string}
+     */
+    function getLocationId(name, line, column) {
+      line = line || '?';
+      column = column || '?';
+      return `${name}@${line}:${column}`;
+    }
+
+    var infoMap = new Map();
+    for (var property of properties) {
+      const locationId = getLocationId(property.name, property.originalNameLineNumber, property.originalNameColumnNumber);
+      infoMap.set(locationId, {
+        name: property.name,
+        value: property.value
+      });
+    }
 
     /** @type {!Map.<number, !Set<string>>} */
-    const namesPerLine = new Map();
-    let skipObjectProperty = false;
-    const tokenizer = new TextEditor.CodeMirrorUtils.TokenizerFactory().createTokenizer('text/javascript');
+    var infoIdsPerLine = new Map();
+    var skipObjectProperty = false;
+    var tokenizer = new TextEditor.CodeMirrorUtils.TokenizerFactory().createTokenizer('text/javascript');
     tokenizer(this._textEditor.line(fromLine).substring(fromColumn), processToken.bind(this, fromLine));
     for (let i = fromLine + 1; i < toLine; ++i)
       tokenizer(this._textEditor.line(i), processToken.bind(this, i));
@@ -908,31 +925,41 @@ Sources.DebuggerPlugin = class extends Sources.UISourceCodeFrame.Plugin {
      * @this {Sources.DebuggerPlugin}
      */
     function processToken(editorLineNumber, tokenValue, tokenType, column, newColumn) {
-      if (!skipObjectProperty && tokenType && this._isIdentifier(tokenType) && valuesMap.get(tokenValue)) {
-        let names = namesPerLine.get(editorLineNumber);
-        if (!names) {
-          names = new Set();
-          namesPerLine.set(editorLineNumber, names);
+      if (!skipObjectProperty && tokenType && this._isIdentifier(tokenType)) {
+        let exists = true;
+        let tokenLocationId = getLocationId(tokenValue, editorLineNumber, column);
+        if (!infoMap.has(tokenLocationId)) {
+          tokenLocationId = getLocationId(tokenValue); // a case without source-maps
+          if (!infoMap.has(tokenLocationId)) {
+            exists = false;
+          }
         }
-        names.add(tokenValue);
+        if (exists) {
+          let ids = infoIdsPerLine.get(editorLineNumber);
+          if (!ids) {
+            ids = new Set();
+            infoIdsPerLine.set(editorLineNumber, ids);
+          }
+          ids.add(tokenLocationId);
+        }
       }
       skipObjectProperty = tokenValue === '.';
     }
-    this._textEditor.operation(this._renderDecorations.bind(this, valuesMap, namesPerLine, fromLine, toLine));
+    this._textEditor.operation(this._renderDecorations.bind(this, infoMap, infoIdsPerLine, fromLine, toLine));
   }
 
   /**
-   * @param {!Map.<string,!SDK.RemoteObject>} valuesMap
-   * @param {!Map.<number, !Set<string>>} namesPerLine
+   * @param {!Map.<string,!{name:string, value: !SDK.RemoteObject}>} infoMap
+   * @param {!Map.<number, !Set<string>>} infoIdsPerLine
    * @param {number} fromLine
    * @param {number} toLine
    */
-  _renderDecorations(valuesMap, namesPerLine, fromLine, toLine) {
+  _renderDecorations(infoMap, infoIdsPerLine, fromLine, toLine) {
     const formatter = new ObjectUI.RemoteObjectPreviewFormatter();
-    for (let i = fromLine; i < toLine; ++i) {
-      const names = namesPerLine.get(i);
-      const oldWidget = this._valueWidgets.get(i);
-      if (!names) {
+    for (var i = fromLine; i < toLine; ++i) {
+      var infoIds = infoIdsPerLine.get(i);
+      var oldWidget = this._valueWidgets.get(i);
+      if (!infoIds) {
         if (oldWidget) {
           this._valueWidgets.delete(i);
           this._textEditor.removeDecoration(oldWidget, i);
@@ -949,20 +976,24 @@ Sources.DebuggerPlugin = class extends Sources.UISourceCodeFrame.Plugin {
       widget.__nameToToken = new Map();
 
       let renderedNameCount = 0;
-      for (const name of names) {
+      for (var infoId of infoIds) {
         if (renderedNameCount > 10)
           break;
-        if (namesPerLine.get(i - 1) && namesPerLine.get(i - 1).has(name))
+        if (infoIdsPerLine.get(i - 1) && infoIdsPerLine.get(i - 1).has(infoId))
           continue;  // Only render name once in the given continuous block.
         if (renderedNameCount)
           widget.createTextChild(', ');
-        const nameValuePair = widget.createChild('span');
-        widget.__nameToToken.set(name, nameValuePair);
-        nameValuePair.createTextChild(name + ' = ');
-        const value = valuesMap.get(name);
-        const propertyCount = value.preview ? value.preview.properties.length : 0;
-        const entryCount = value.preview && value.preview.entries ? value.preview.entries.length : 0;
-        if (value.preview && propertyCount + entryCount < 10) {
+        var nameValuePair = widget.createChild('span');
+        widget.__nameToToken.set(infoId, nameValuePair);
+        var info = infoMap.get(infoId);
+        nameValuePair.createTextChild(info.name + ' = ');
+        var value = info.value;
+        var propertyCount = value.preview ? value.preview.properties.length : 0;
+        var entryCount = value.preview && value.preview.entries ? value.preview.entries.length : 0;
+        if (dirac.hasInlineCFs && value.customPreview()) {
+          var customValueEl = (new ObjectUI.CustomPreviewComponent(value)).element;
+          nameValuePair.appendChild(customValueEl);
+        } else if (value.preview && propertyCount + entryCount < 10) {
           formatter.appendObjectPreview(nameValuePair, value.preview, false /* isEntry */);
         } else {
           nameValuePair.appendChild(ObjectUI.ObjectPropertiesSection.createValueElement(

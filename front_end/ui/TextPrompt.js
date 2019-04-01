@@ -118,7 +118,7 @@ UI.TextPrompt = class extends Common.Object {
     this._element.classList.add('text-prompt');
     UI.ARIAUtils.markAsTextBox(this._element);
     this._element.setAttribute('contenteditable', 'plaintext-only');
-    this._element.addEventListener('keydown', this._boundOnKeyDown, false);
+    this._element.addEventListener('keydown', this._boundOnKeyDown, true);
     this._element.addEventListener('input', this._boundOnInput, false);
     this._element.addEventListener('mousewheel', this._boundOnMouseWheel, false);
     this._element.addEventListener('selectstart', this._boundClearAutocomplete, false);
@@ -225,7 +225,7 @@ UI.TextPrompt = class extends Common.Object {
 
   _removeFromElement() {
     this.clearAutocomplete();
-    this._element.removeEventListener('keydown', this._boundOnKeyDown, false);
+    this._element.removeEventListener('keydown', this._boundOnKeyDown, true);
     this._element.removeEventListener('input', this._boundOnInput, false);
     this._element.removeEventListener('selectstart', this._boundClearAutocomplete, false);
     this._element.removeEventListener('blur', this._boundClearAutocomplete, false);
@@ -310,9 +310,10 @@ UI.TextPrompt = class extends Common.Object {
         }
         break;
     }
-
-    if (isEnterKey(event))
-      event.preventDefault();
+    if (!dirac.ignoreEnter) {
+      if (isEnterKey(event))
+        event.preventDefault();
+    }
 
     if (handled)
       event.consume(true);
@@ -651,6 +652,24 @@ UI.TextPrompt = class extends Common.Object {
 
     selection.removeAllRanges();
     selection.addRange(selectionRange);
+  }
+
+  moveCaretToIndex(index) {
+    var selection = this._element.getComponentSelection();
+    var selectionRange = this._createRange();
+
+    selectionRange.setStart(this._element.firstChild, index);
+    selectionRange.setEnd(this._element.firstChild, index);
+
+    selection.removeAllRanges();
+    selection.addRange(selectionRange);
+  }
+
+  /**
+   * @return {string}
+   */
+  getSuggestBoxRepresentation() {
+    return "getSuggestBoxRepresentation not implemented for UI.TextPrompt";
   }
 
   /**
